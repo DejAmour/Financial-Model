@@ -289,7 +289,7 @@ def create_assumptions_sheet(wb: openpyxl.Workbook, assumptions: dict):
     ]
     for i, (label, val) in enumerate(rows_scen, start=19):
         set_cell(ws, i, 1, label, font=BLACK, alignment=LEFT)
-        set_cell(ws, i, 3, val,   font=BLUE,  alignment=CENTER, number_format="0.0x")
+        set_cell(ws, i, 3, val,   font=BLUE,  alignment=CENTER, number_format="0.0")
 
     add_comment(ws, 19, 3, "Worst case = Base × 0.6  (40% haircut on Funds Raised)")
     add_comment(ws, 20, 3, "Best case  = Base × 1.4  (40% uplift on Funds Raised)")
