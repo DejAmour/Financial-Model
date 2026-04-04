@@ -86,6 +86,29 @@ ASSUMPTIONS = {
     "capex": 0,                         # No CapEx (asset-light model)
     "project_attrition_rate": None,     # Placeholder for future use
 
+    # --- Valuation Model Assumptions ---
+    "valuation_date": "2025-08-01",
+    "exit_year": 5,
+    "ev_revenue_multiple": 7,
+    "financial_debt_at_exit": 0,
+    "required_return_y1_3": 0.50,
+    "required_return_y3_6": 0.35,
+    "required_return_y6_10": 0.25,
+    "revenue_cagr_y5_y10": 0.60,
+    "equity_growth_rate_y5_10": 0.60,
+
+    # --- Cap Table Assumptions ---
+    "fx_rate_usd_gbp": 0.7577,
+    "founder_shares": 1_000_000,
+    "funding_rounds": [
+        {"name": "Pre-seed T1", "date": "2025-10-01", "ownership_pct": 0.040652},
+        {"name": "Pre-seed T2", "date": "2026-03-01", "ownership_pct": 0.029269},
+        {"name": "Seed",        "date": "2026-10-01", "ownership_pct": 0.137200},
+        {"name": "Series A T1", "date": "2027-10-01", "ownership_pct": 0.095278},
+        {"name": "Series A T2", "date": "2028-10-01", "ownership_pct": 0.049624},
+        {"name": "Series B",    "date": "2029-10-01", "ownership_pct": 0.129228},
+    ],
+
     # --- kWh Revenue Calculation Basis (Source: UK DESNZ) ---
     "wind_turbine_capacity_mw": 2.5,    # Midpoint of 2-3 MW (UK DESNZ)
     "annual_output_mwh": 7_000,         # Midpoint of 6,000-8,000 MWh per turbine p.a.
@@ -1211,7 +1234,584 @@ def build_cash_flow(wb: openpyxl.Workbook):
 
 
 # ==============================================================================
-# 6. APPLY GLOBAL FORMATTING
+# 6. CREATE VALUATION SHEET
+# ==============================================================================
+
+def create_valuation_sheet(wb: openpyxl.Workbook, assumptions: dict):
+    """
+    Builds the Valuation tab — a VC valuation model that:
+      - Projects revenue from Income Statement (years 1-5) then grows at 60% CAGR
+      - Applies an EV/Revenue multiple to derive Enterprise Value per year
+      - Discounts equity values back using tiered discount rates (50%/35%/25%)
+      - Calculates investor IRR and cash-on-cash multiple
+
+    Row map:
+      3   — Section A header: VALUATION ASSUMPTIONS
+      4   — Currency
+      5   — Valuation date
+      6   — Exit year
+      7   — EV/Revenue multiple
+      8   — Financial debt at exit
+      9   — Cash at exit (linked to Balance Sheet G6)
+      10  — Required return Y1-3
+      11  — Required return Y4-6
+      12  — Required return Y7-10
+      13  — Revenue CAGR Y5-Y10
+      14  — Equity growth rate Y5-Y10
+      16  — Year headers (0-10)
+      17  — Section B header: REVENUE PROJECTIONS
+      18  — Net Revenue (years 1-5 from IS, years 6-10 at 60% CAGR)
+      20  — Section C header: VC VALUATION TABLE
+      21  — Forecast year (0-10)
+      22  — Cash flow dates (EDATE 12-month increments)
+      23  — Net Revenue
+      24  — Enterprise Value (EV = Revenue × multiple)
+      25  — Financial Debt (only at exit year)
+      26  — Cash (exit year from BS; years 6-10 at 2% revenue; else 0)
+      27  — Equity Value
+      28  — Discount Rate (tiered)
+      29  — Discount Period (cumulative years from valuation date)
+      30  — Discount Factor
+      31  — Present Value (exit year onwards)
+      33  — Section D header: INVESTOR CALCULATION
+      34  — Investment amount
+      35  — Equity stake at entry
+      36  — Dilution effect
+      37  — Equity stake at exit
+      38  — Exit proceeds (equity_value[exit_year] × stake_at_exit)
+      39  — Investor cash flows (year 0: -investment, year 5: exit proceeds)
+      40  — IRR (=IRR on cash flow range)
+      41  — Cash-on-cash multiple
+      43  — Section E header: SUMMARY METRICS
+      44  — Equity Value Today (PV at exit year)
+      45  — Investor IRR
+      46  — Cash-on-Cash Multiple
+      47  — Exit Proceeds
+    """
+    ws = wb.create_sheet("Valuation")
+
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 15
+    for c_idx in range(3, 15):          # columns C through N (year 0 through 10)
+        ws.column_dimensions[col(c_idx)].width = 15
+
+    # ── Title ──────────────────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 24
+    set_cell(ws, 1, 1, "VALUATION MODEL — VC METHOD", font=TITLE_FONT, fill=SECTION_FILL)
+    for c in range(2, 15):
+        ws.cell(row=1, column=c).fill = SECTION_FILL
+
+    set_cell(ws, 2, 1, "All figures in GBP (£) unless stated", font=BLACK, alignment=LEFT)
+
+    # ── Section A: Valuation Assumptions ──────────────────────────────────────
+    write_section_header(ws, 3, "A. VALUATION ASSUMPTIONS", num_cols=14)
+
+    assump_rows = [
+        (4,  "Currency",                           "GBP",                                       None),
+        (5,  "Valuation Date",                      assumptions["valuation_date"],               None),
+        (6,  "Exit Year",                           assumptions["exit_year"],                    NUM_FORMAT),
+        (7,  "EV / Revenue Multiple",               assumptions["ev_revenue_multiple"],          '0"x"'),
+        (8,  "Financial Debt at Exit (£)",          assumptions["financial_debt_at_exit"],       GBP_FORMAT),
+        (9,  "Cash at Exit (£)  [→ Balance Sheet G6]", "='Balance Sheet'!G6",                   GBP_FORMAT),
+        (10, "Required Return Y1-3",                assumptions["required_return_y1_3"],         PCT_FORMAT),
+        (11, "Required Return Y4-6",                assumptions["required_return_y3_6"],         PCT_FORMAT),
+        (12, "Required Return Y7-10",               assumptions["required_return_y6_10"],        PCT_FORMAT),
+        (13, "Revenue CAGR Y5-Y10",                 assumptions["revenue_cagr_y5_y10"],          PCT_FORMAT),
+        (14, "Equity Growth Rate Y5-Y10",           assumptions["equity_growth_rate_y5_10"],     PCT_FORMAT),
+    ]
+    for row_num, label, val, fmt in assump_rows:
+        set_cell(ws, row_num, 1, label, font=BLACK, alignment=LEFT)
+        if isinstance(val, str) and val.startswith("="):
+            fnt = GREEN
+        elif isinstance(val, (int, float)):
+            fnt = BLUE
+        else:
+            fnt = BLUE
+        c = set_cell(ws, row_num, 3, val, font=fnt, alignment=CENTER,
+                     number_format=fmt if fmt else "@")
+
+    add_comment(ws, 10, 3,
+        "Tiered discount rates (FAST VC convention):\n"
+        "  Y1-3:  50% (highest risk — early stage)\n"
+        "  Y4-6:  35% (growth stage)\n"
+        "  Y7-10: 25% (more mature, lower risk)\n"
+        "Discount is compounded through each tier cumulatively.")
+
+    # ── Year header row (0-10 across columns C-M) ─────────────────────────────
+    set_cell(ws, 16, 1, "Forecast Year →", font=BOLD_BLACK, alignment=LEFT)
+    for yr in range(11):   # 0 to 10
+        set_cell(ws, 16, 3 + yr, yr, font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    # ── Section B: Revenue Projections ────────────────────────────────────────
+    write_section_header(ws, 17, "B. REVENUE PROJECTIONS  (£)", num_cols=14)
+
+    set_cell(ws, 18, 1, "Net Revenue (Total Gross Revenue)", font=BLACK, alignment=LEFT)
+    set_cell(ws, 18, 3, 0, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)   # year 0: no revenue
+
+    # Years 1-5: link to Income Statement row 10 (Total Gross Revenue), columns C-G
+    is_cols = ["C", "D", "E", "F", "G"]
+    for i, is_col in enumerate(is_cols):
+        formula = f"='Income Statement'!{is_col}10"
+        set_cell(ws, 18, 4 + i, formula, font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Years 6-10: grow at revenue_cagr (60%) from prior year
+    # Year 6 = G18 * (1 + cagr); year 7 = H18 * (1+cagr) etc.
+    for i in range(5):   # columns I through M (indices 9-13, years 6-10)
+        prev_col_letter = col(3 + 5 + i)   # H, I, J, K, L
+        curr_col_idx = 3 + 5 + i + 1       # I, J, K, L, M
+        formula = f"={prev_col_letter}18*(1+$C$13)"
+        set_cell(ws, 18, curr_col_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    add_comment(ws, 18, 4,
+        "Years 1-5: linked directly to 'Income Statement'!C10:G10 (Total Gross Revenue).\n"
+        "Years 6-10: prior year revenue × (1 + Revenue CAGR Y5-Y10) = 60% growth.")
+
+    # ── Section C: VC Valuation Table ─────────────────────────────────────────
+    write_section_header(ws, 20, "C. VC VALUATION TABLE", num_cols=14)
+
+    # Row 21: Forecast Year (0-10)
+    set_cell(ws, 21, 1, "Forecast Year", font=BLACK, alignment=LEFT)
+    for yr in range(11):
+        set_cell(ws, 21, 3 + yr, yr, font=BLACK, alignment=CENTER, number_format=NUM_FORMAT)
+
+    # Row 22: Cash flow dates — EDATE from valuation_date in 12-month increments
+    # valuation_date is in C5 (row 5, col 3)
+    set_cell(ws, 22, 1, "Cash Flow Date", font=BLACK, alignment=LEFT)
+    # Year 0 = valuation date
+    set_cell(ws, 22, 3, "=$C$5", font=BLACK, alignment=CENTER, number_format="YYYY-MM-DD")
+    for yr in range(1, 11):
+        prev_col_letter = col(3 + yr - 1)
+        formula = f"=EDATE({prev_col_letter}22,12)"
+        set_cell(ws, 22, 3 + yr, formula, font=BLACK, alignment=CENTER, number_format="YYYY-MM-DD")
+
+    # Row 23: Net Revenue (mirror of row 18)
+    set_cell(ws, 23, 1, "Net Revenue (£)", font=BLACK, alignment=LEFT)
+    for c_idx in range(11):
+        src_col_letter = col(3 + c_idx)
+        formula = f"={src_col_letter}18"
+        set_cell(ws, 23, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 24: Enterprise Value = Revenue × multiple
+    set_cell(ws, 24, 1, "Enterprise Value  (EV = Revenue × Multiple)", font=BLACK, alignment=LEFT)
+    for c_idx in range(11):
+        src_col_letter = col(3 + c_idx)
+        formula = f"={src_col_letter}23*$C$7"
+        set_cell(ws, 24, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 25: Financial Debt (negative; only at exit year, i.e. col H = year 5)
+    # exit_year = C6 (row 6, col 3)
+    set_cell(ws, 25, 1, "Financial Debt at Exit (£)", font=BLACK, alignment=LEFT)
+    for c_idx in range(11):
+        yr_num = c_idx  # 0-10
+        if yr_num == 0:
+            set_cell(ws, 25, 3 + c_idx, 0, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+        else:
+            src_col_letter = col(3 + c_idx)
+            # IF forecast_year == exit_year: -debt, else 0
+            formula = f"=IF({src_col_letter}21=$C$6,-$C$8,0)"
+            set_cell(ws, 25, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 26: Cash
+    # At exit year: link to Balance Sheet G6 (cash at year 5 = col G)
+    # Years > exit: 2% of revenue
+    # Else: 0
+    set_cell(ws, 26, 1, "Cash at Exit / 2% of Revenue (£)", font=BLACK, alignment=LEFT)
+    add_comment(ws, 26, 1,
+        "Cash logic by year:\n"
+        "  Exit year (5): linked to 'Balance Sheet'!G6 (closing cash 2030)\n"
+        "  Years 6-10: 2% of net revenue (proxy for cash balance)\n"
+        "  All other years: £0")
+    for c_idx in range(11):
+        yr_num = c_idx
+        if yr_num == 0:
+            set_cell(ws, 26, 3 + c_idx, 0, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+        else:
+            src_col_letter = col(3 + c_idx)
+            formula = (
+                f"=IF({src_col_letter}21=$C$6,$C$9,"
+                f"IF({src_col_letter}21>$C$6,{src_col_letter}23*0.02,0))"
+            )
+            fnt = GREEN if yr_num == 5 else BLACK  # year 5 references BS via C9
+            set_cell(ws, 26, 3 + c_idx, formula, font=fnt, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 27: Equity Value
+    # Years 1-exit: EV + debt + cash
+    # Years > exit: prior year equity value × (1 + equity_growth_rate)
+    set_cell(ws, 27, 1, "Equity Value (£)", font=BLACK, alignment=LEFT)
+    add_comment(ws, 27, 1,
+        "Equity Value calculation:\n"
+        "  Years 1-5 (up to exit): EV + Financial Debt + Cash\n"
+        "  Years 6-10 (post-exit): prior year Equity Value × (1 + Equity Growth Rate)")
+    # Year 0: no equity value
+    set_cell(ws, 27, 3, 0, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+    for c_idx in range(1, 11):
+        yr_num = c_idx
+        src_col_letter = col(3 + c_idx)
+        prev_col_letter = col(3 + c_idx - 1)
+        formula = (
+            f"=IF({src_col_letter}21<=$C$6,"
+            f"{src_col_letter}24+{src_col_letter}25+{src_col_letter}26,"
+            f"{prev_col_letter}27*(1+$C$14))"
+        )
+        set_cell(ws, 27, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 28: Discount Rate (tiered by year)
+    set_cell(ws, 28, 1, "Discount Rate (tiered)", font=BLACK, alignment=LEFT)
+    add_comment(ws, 28, 1,
+        "Tiered discount rate:\n"
+        "  Years 1-3:  50% (C10)\n"
+        "  Years 4-6:  35% (C11)\n"
+        "  Years 7-10: 25% (C12)")
+    # Year 0: no discount rate
+    set_cell(ws, 28, 3, 0, font=BLACK, alignment=RIGHT, number_format=PCT_FORMAT)
+    for c_idx in range(1, 11):
+        yr_num = c_idx
+        src_col_letter = col(3 + c_idx)
+        formula = (
+            f"=IF({src_col_letter}21<=3,$C$10,"
+            f"IF({src_col_letter}21<=6,$C$11,$C$12))"
+        )
+        set_cell(ws, 28, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=PCT_FORMAT)
+
+    # Row 29: Discount Period (cumulative years from valuation date)
+    set_cell(ws, 29, 1, "Discount Period (years from valuation date)", font=BLACK, alignment=LEFT)
+    # Year 0: period = 0
+    set_cell(ws, 29, 3, 0, font=BLACK, alignment=RIGHT, number_format="0.0")
+    for c_idx in range(1, 11):
+        src_col_letter = col(3 + c_idx)
+        # ROUND((date - valuation_date)/365, 1) but cumulative
+        # = C29 + ROUND((this_date - prev_date)/365, 1)
+        prev_col_letter = col(3 + c_idx - 1)
+        formula = f"={prev_col_letter}29+ROUND(({src_col_letter}22-{prev_col_letter}22)/365,1)"
+        set_cell(ws, 29, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format="0.0")
+
+    # Row 30: Discount Factor = 1 / (1 + rate)^period
+    set_cell(ws, 30, 1, "Discount Factor", font=BLACK, alignment=LEFT)
+    set_cell(ws, 30, 3, 1, font=BLACK, alignment=RIGHT, number_format="0.0000")
+    for c_idx in range(1, 11):
+        src_col_letter = col(3 + c_idx)
+        formula = f"=1/(1+{src_col_letter}28)^{src_col_letter}29"
+        set_cell(ws, 30, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format="0.0000")
+
+    # Row 31: Present Value — compound discount through tiers, exit year onwards only
+    # PV formula for year n: equity_value / ((1+r_y1_3)^min(n,3) * (1+r_y3_6)^max(0,min(n,6)-3) * (1+r_y6_10)^max(0,n-6))
+    set_cell(ws, 31, 1, "Present Value (£) — exit year onwards", font=BLACK, alignment=LEFT)
+    add_comment(ws, 31, 1,
+        "Present Value uses compound tiered discounting:\n"
+        "  PV = Equity Value / ((1+r_y1_3)^y1_3_yrs × (1+r_y3_6)^y3_6_yrs × (1+r_y6_10)^y6_10_yrs)\n"
+        "  Only calculated from exit year (5) onwards.\n"
+        "  y1_3_yrs = MIN(n,3)\n"
+        "  y3_6_yrs = MAX(0, MIN(n,6)-3)\n"
+        "  y6_10_yrs = MAX(0, n-6)")
+    # Years 0-4: blank/0
+    for c_idx in range(5):
+        set_cell(ws, 31, 3 + c_idx, "", font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+    # Years 5-10: compound discount
+    for c_idx in range(5, 11):
+        yr_num = c_idx
+        src_col_letter = col(3 + c_idx)
+        # For year n: y1_3_yrs = MIN(n,3), y3_6_yrs = MAX(0,MIN(n,6)-3), y6_10_yrs = MAX(0,n-6)
+        formula = (
+            f"={src_col_letter}27/"
+            f"((1+$C$10)^MIN({yr_num},3)"
+            f"*(1+$C$11)^MAX(0,MIN({yr_num},6)-3)"
+            f"*(1+$C$12)^MAX(0,{yr_num}-6))"
+        )
+        set_cell(ws, 31, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # ── Section D: Investor Calculation ───────────────────────────────────────
+    write_section_header(ws, 33, "D. INVESTOR CALCULATION", num_cols=14)
+
+    # Labels in column A, values in column C (inputs), then year-by-year in C-M
+    set_cell(ws, 34, 1, "Investment Amount (£)",          font=BLACK, alignment=LEFT)
+    set_cell(ws, 34, 3, 250_000, font=BLUE, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    set_cell(ws, 35, 1, "Equity Stake at Entry",          font=BLACK, alignment=LEFT)
+    # Pull from Cap Table: Pre-seed T1 ownership % (Section B, row 9, col C)
+    set_cell(ws, 35, 3, "='Cap Table'!C9", font=GREEN, alignment=CENTER, number_format=PCT_FORMAT)
+    add_comment(ws, 35, 3, "Linked to Cap Table!C9 — Pre-seed T1 ownership % granted at round.")
+
+    set_cell(ws, 36, 1, "Dilution Effect",                font=BLACK, alignment=LEFT)
+    # Dilution = final ownership - entry ownership (from Cap Table Section D)
+    set_cell(ws, 36, 3, "='Cap Table'!C30-'Cap Table'!C9", font=GREEN, alignment=CENTER, number_format=PCT_FORMAT)
+    add_comment(ws, 36, 3,
+        "Dilution = Pre-seed T1 final ownership % (Section D, row 30) minus initial stake (Section B, row 9).\n"
+        "Negative value = dilution from subsequent funding rounds.")
+
+    set_cell(ws, 37, 1, "Equity Stake at Exit",           font=BLACK, alignment=LEFT)
+    set_cell(ws, 37, 3, "=$C$35+$C$36", font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+
+    set_cell(ws, 38, 1, "Exit Proceeds  (Equity Value × Stake at Exit)", font=BLACK, alignment=LEFT)
+    # Exit proceeds = equity value at exit year × stake at exit
+    # Exit year is year 5 → column H (3+5=8)
+    exit_col_letter = col(3 + 5)   # H
+    set_cell(ws, 38, 3, f"={exit_col_letter}27*$C$37", font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 39: Investor Cash Flows across years 0-10
+    set_cell(ws, 39, 1, "Investor Cash Flows (£)", font=BLACK, alignment=LEFT)
+    for c_idx in range(11):
+        yr_num = c_idx
+        src_col_letter = col(3 + c_idx)
+        if yr_num == 0:
+            formula = "=-$C$34"     # outflow at year 0
+        elif yr_num == 5:           # exit year
+            formula = f"=$C$38"
+        else:
+            formula = "=0"
+        set_cell(ws, 39, 3 + c_idx, formula, font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Row 40: IRR — using Excel's IRR() on investor cash flows C39:M39
+    set_cell(ws, 40, 1, "Investor IRR  (=IRR of cash flows)", font=BLACK, alignment=LEFT)
+    set_cell(ws, 40, 3, "=IRR(C39:M39)", font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+    add_comment(ws, 40, 3,
+        "IRR uses Excel's built-in IRR() function on the investor cash flow series.\n"
+        "Cash flows: Year 0 = -Investment; Years 1-4 = 0; Year 5 = Exit Proceeds; Years 6-10 = 0.")
+
+    # Row 41: Cash-on-Cash multiple
+    set_cell(ws, 41, 1, "Cash-on-Cash Multiple  (Exit Proceeds ÷ Investment)", font=BLACK, alignment=LEFT)
+    set_cell(ws, 41, 3, "=$C$38/$C$34", font=BLACK, alignment=RIGHT, number_format='0.00"x"')
+
+    # ── Section E: Summary Metrics ─────────────────────────────────────────────
+    write_section_header(ws, 43, "E. SUMMARY METRICS", num_cols=14)
+
+    summary_rows = [
+        (44, "Equity Value Today (£)",       f"={exit_col_letter}31",  GBP_FORMAT),
+        (45, "Investor IRR",                 "=$C$40",                 PCT_FORMAT),
+        (46, "Cash-on-Cash Multiple",        "=$C$41",                 '0.00"x"'),
+        (47, "Exit Proceeds (Year 5, £)",    "=$C$38",                 GBP_FORMAT),
+    ]
+    for row_num, label, formula, fmt in summary_rows:
+        set_cell(ws, row_num, 1, label, font=BLACK, alignment=LEFT)
+        set_cell(ws, row_num, 3, formula, font=BLACK, alignment=RIGHT, number_format=fmt,
+                 fill=TOTAL_FILL)
+
+    ws.freeze_panes = "C4"
+    return ws
+
+
+# ==============================================================================
+# 7. CREATE CAP TABLE SHEET
+# ==============================================================================
+
+def create_cap_table_sheet(wb: openpyxl.Workbook, assumptions: dict):
+    """
+    Builds the Cap Table tab — tracks equity ownership across all funding rounds.
+
+    Funding rounds: Pre-seed T1, Pre-seed T2, Seed, Series A T1, Series A T2, Series B
+
+    Shares issued formula (correct cumulative dilution):
+        new_shares = cumulative_shares_before_round / (1 - ownership_pct) - cumulative_shares_before_round
+
+    Row map:
+      3   — Section A: INITIAL CAP TABLE header
+      4   — Column headers
+      5   — Founders row (1,000,000 shares, 100%)
+      7   — Section B: FUNDING ROUNDS header
+      8   — Column headers
+      9-14 — Six funding round rows
+      16  — Section C: CUMULATIVE CAP TABLE header
+      17  — Column headers (shareholders × rounds)
+      18-24 — Shareholder rows (Founders + 6 investors)
+      25  — Total shares row
+      27  — Section D: FINAL OWNERSHIP % header
+      28  — Column headers
+      29-35 — Final ownership rows
+      36  — Total / check row
+
+    Assumptions sheet column mapping for equity raises (row 52):
+      C52 = Pre-seed T1 (£500K, 2025-10 raise)
+      D52 = Pre-seed T2 + Seed (both map to the 2027 model raise slot, £1.5M)
+      E52 = Series A T1 (£4M, 2028)
+      F52 = Series A T2 (£0, 2029)
+      G52 = Series B (£9M, 2030)
+    """
+    ws = wb.create_sheet("Cap Table")
+
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 14
+    for c_idx in range(4, 12):
+        ws.column_dimensions[col(c_idx)].width = 15
+
+    rounds = assumptions["funding_rounds"]   # list of 6 dicts
+    founder_shares = assumptions["founder_shares"]
+    fx_rate = assumptions["fx_rate_usd_gbp"]
+
+    # ── Title ──────────────────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 24
+    set_cell(ws, 1, 1, "CAPITALISATION TABLE  (CAP TABLE)", font=TITLE_FONT, fill=SECTION_FILL)
+    for c in range(2, 12):
+        ws.cell(row=1, column=c).fill = SECTION_FILL
+
+    set_cell(ws, 2, 1, "Share counts are fractional — rounded for display only", font=BLACK)
+    # FX rate input (top-right area)
+    set_cell(ws, 2, 9, "GBP/USD FX Rate:", font=BLACK, alignment=RIGHT)
+    set_cell(ws, 2, 10, fx_rate, font=BLUE, alignment=CENTER, number_format="0.0000")
+    add_comment(ws, 2, 10,
+        "GBP/USD FX rate used for $ conversions.\n"
+        "Hardcoded fallback = 0.7577. Update cell directly to refresh $ columns.")
+
+    # ── Section A: Initial Cap Table ──────────────────────────────────────────
+    write_section_header(ws, 3, "A. INITIAL CAP TABLE  (Pre-Funding)", num_cols=11)
+
+    hdr_a = ["Shareholder", "Shares", "Ownership %"]
+    for i, h in enumerate(hdr_a, start=1):
+        set_cell(ws, 4, i, h, font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    set_cell(ws, 5, 1, "Founders",       font=BLUE, alignment=LEFT)
+    set_cell(ws, 5, 2, founder_shares,   font=BLUE, alignment=RIGHT, number_format=NUM_FORMAT)
+    set_cell(ws, 5, 3, "=B5/B5",         font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+    add_comment(ws, 5, 2, f"Founder shares: {founder_shares:,} (from Assumptions)")
+
+    # ── Section B: Funding Rounds ──────────────────────────────────────────────
+    write_section_header(ws, 7, "B. FUNDING ROUNDS", num_cols=11)
+
+    round_hdrs = [
+        "Round", "Date", "Ownership %", "Shares Issued",
+        "Amount (£)", "Amount ($)", "Valuation (£)", "Valuation ($)"
+    ]
+    for i, h in enumerate(round_hdrs, start=1):
+        set_cell(ws, 8, i, h, font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    # Equity raises in Assumptions row 52, columns C-G
+    # Mapping: round index → Assumptions column (per problem spec)
+    # Pre-seed T1 (0)→C52 (£500K, 2025-10 raise), Pre-seed T2 (1)→D52 (£1.5M, same D column
+    # as Seed because both fall in the model's 2027 raise slot), Seed (2)→D52,
+    # Series A T1 (3)→E52 (£4M), Series A T2 (4)→F52 (£0), Series B (5)→G52 (£9M)
+    equity_raise_cols = ["C", "D", "D", "E", "F", "G"]
+
+    add_comment(ws, 8, 4,
+        "Shares Issued formula (correct cumulative dilution):\n"
+        "  new_shares = cumulative_shares / (1 - ownership_pct) - cumulative_shares\n"
+        "  Uses running total of ALL shares outstanding before this round.\n"
+        "  This ensures investors receive exactly their target post-round ownership %.")
+
+    # Compute share data rows (9-14)
+    # We need running totals — build these as Excel formulas referencing each other
+    # Row 9 = round 0 (Pre-seed T1), row 10 = round 1 (Pre-seed T2), ...
+    for r_idx, rnd in enumerate(rounds):
+        data_row = 9 + r_idx   # rows 9..14
+
+        set_cell(ws, data_row, 1, rnd["name"], font=BLUE, alignment=LEFT)
+        set_cell(ws, data_row, 2, rnd["date"], font=BLUE, alignment=CENTER)
+
+        # Ownership %
+        set_cell(ws, data_row, 3, rnd["ownership_pct"],
+                 font=BLUE, alignment=CENTER, number_format="0.0000%")
+
+        # Shares issued: cumulative_before / (1 - pct) - cumulative_before
+        # Cumulative shares before this round:
+        #   round 0: B5 (founder shares)
+        #   round n: B5 + sum of D9:D(data_row-1)
+        if r_idx == 0:
+            cum_before = "B5"
+        else:
+            cum_before = f"B5+SUM(D9:D{data_row - 1})"
+
+        shares_formula = f"=({cum_before})/(1-C{data_row})-({cum_before})"
+        set_cell(ws, data_row, 4, shares_formula, font=BLACK, alignment=RIGHT, number_format=NUM_FORMAT)
+
+        # Amount raised (£) — linked to Assumptions!<col>52
+        assump_col = equity_raise_cols[r_idx]
+        amount_formula = f"=Assumptions!{assump_col}52"
+        set_cell(ws, data_row, 5, amount_formula, font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+        # Amount raised ($) = Amount(£) / fx_rate
+        set_cell(ws, data_row, 6, f"=E{data_row}/$J$2",
+                 font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+        # Valuation (£) = Amount(£) / ownership_pct
+        set_cell(ws, data_row, 7, f"=E{data_row}/C{data_row}",
+                 font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+        # Valuation ($)
+        set_cell(ws, data_row, 8, f"=G{data_row}/$J$2",
+                 font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # FX rate reference cell (J2 used above)
+    set_cell(ws, 2, 10, fx_rate, font=BLUE, alignment=CENTER, number_format="0.0000")
+
+    # ── Section C: Cumulative Cap Table Matrix ─────────────────────────────────
+    write_section_header(ws, 16, "C. CUMULATIVE CAP TABLE  (Shares after each round)", num_cols=11)
+
+    # Column headers: Shareholder | Founders | Pre-seed T1 | ... | Series B
+    set_cell(ws, 17, 1, "Shareholder", font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 17, 2, "Founders",    font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    for r_idx, rnd in enumerate(rounds):
+        set_cell(ws, 17, 3 + r_idx, rnd["name"],
+                 font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    # Shareholder rows 18-24: Founders (18), then each investor round (19-24)
+    # For each column = cumulative shares held by that shareholder after that column's round
+
+    # Row 18: Founders — always hold their original B5 shares
+    set_cell(ws, 18, 1, "Founders", font=BLACK, alignment=LEFT)
+    # After each round founders hold same shares (no dilution in share count, just %)
+    for col_idx in range(7):   # 7 columns: Founders, T1..Series B
+        set_cell(ws, 18, 2 + col_idx, "=$B$5", font=BLACK, alignment=RIGHT, number_format=NUM_FORMAT)
+
+    # Rows 19-24: Each investor (holds 0 before their round, shares_issued after)
+    for r_idx, rnd in enumerate(rounds):
+        investor_row = 19 + r_idx   # 19..24
+        set_cell(ws, investor_row, 1, rnd["name"], font=BLACK, alignment=LEFT)
+
+        for col_idx in range(7):   # columns 2-8 = Founders round through Series B
+            # col_idx 0 = "Founders only" column, col_idx 1 = after T1, etc.
+            if col_idx < r_idx + 1:
+                # Before this investor's round — they hold 0
+                set_cell(ws, investor_row, 2 + col_idx, 0, font=BLACK, alignment=RIGHT, number_format=NUM_FORMAT)
+            else:
+                # After their round — hold the shares they were issued (D9+r_idx row)
+                shares_row = 9 + r_idx
+                set_cell(ws, investor_row, 2 + col_idx, f"=$D${shares_row}",
+                         font=BLACK, alignment=RIGHT, number_format=NUM_FORMAT)
+
+    # Row 25: Column totals
+    write_subheader(ws, 25, "TOTAL SHARES", num_cols=8)
+    for col_idx in range(7):
+        col_letter = col(2 + col_idx)
+        formula = f"=SUM({col_letter}18:{col_letter}24)"
+        set_cell(ws, 25, 2 + col_idx, formula,
+                 font=BOLD_BLACK, fill=SUBSECT_FILL, alignment=RIGHT, number_format=NUM_FORMAT)
+
+    # ── Section D: Final Ownership % ──────────────────────────────────────────
+    write_section_header(ws, 27, "D. FINAL OWNERSHIP %  (After All Rounds)", num_cols=11)
+
+    set_cell(ws, 28, 1, "Shareholder",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 28, 2, "Shares Held",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 28, 3, "Ownership %",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    # Total shares after all rounds is in column H row 25 (col_idx=6 → col 8=H)
+    total_col_letter = col(2 + 6)   # H
+
+    shareholder_rows = [
+        (29, "Founders",     "=$B$5"),
+    ]
+    for r_idx, rnd in enumerate(rounds):
+        shares_row = 9 + r_idx
+        shareholder_rows.append((30 + r_idx, rnd["name"], f"=$D${shares_row}"))
+
+    for row_num, name, shares_formula in shareholder_rows:
+        set_cell(ws, row_num, 1, name, font=BLACK, alignment=LEFT)
+        set_cell(ws, row_num, 2, shares_formula, font=BLACK, alignment=RIGHT, number_format=NUM_FORMAT)
+        # Ownership % = shares / total_shares
+        set_cell(ws, row_num, 3, f"=B{row_num}/{total_col_letter}25",
+                 font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+
+    # Total check row
+    write_subheader(ws, 36, "TOTAL", num_cols=4)
+    set_cell(ws, 36, 2, f"={total_col_letter}25",
+             font=BOLD_BLACK, fill=SUBSECT_FILL, alignment=RIGHT, number_format=NUM_FORMAT)
+    set_cell(ws, 36, 3, "=SUM(C29:C35)",
+             font=BOLD_BLACK, fill=SUBSECT_FILL, alignment=CENTER, number_format=PCT_FORMAT)
+    add_comment(ws, 36, 3, "Should equal 100%. If not, check shares-issued formulas.")
+
+    ws.freeze_panes = "B4"
+    return ws
+
+
+# ==============================================================================
+# 8. APPLY GLOBAL FORMATTING
 # ==============================================================================
 
 def apply_global_formatting(wb: openpyxl.Workbook):
@@ -1229,6 +1829,8 @@ def apply_global_formatting(wb: openpyxl.Workbook):
         "Income Statement": "375623",   # dark green
         "Balance Sheet":    "843C0C",   # dark orange/brown
         "Cash Flow":        "7030A0",   # purple
+        "Valuation":        "C65911",   # burnt orange
+        "Cap Table":        "7030A0",   # purple
     }
 
     for sheet_name, hex_colour in tab_colours.items():
@@ -1241,7 +1843,7 @@ def apply_global_formatting(wb: openpyxl.Workbook):
             ws.page_setup.orientation = "landscape"
 
     # Ensure "Assumptions" is first tab, then Scenarios, then statements
-    desired_order = ["Assumptions", "Scenarios", "Income Statement", "Balance Sheet", "Cash Flow"]
+    desired_order = ["Assumptions", "Scenarios", "Income Statement", "Balance Sheet", "Cash Flow", "Valuation", "Cap Table"]
     for i, name in enumerate(desired_order):
         if name in wb.sheetnames:
             wb.move_sheet(name, offset=wb.sheetnames.index(name) - i)
@@ -1261,22 +1863,28 @@ def main():
 
     print("Building Joule Financial Model...")
 
-    print("  [1/6] Creating Assumptions sheet...")
+    print("  [1/8] Creating Assumptions sheet...")
     create_assumptions_sheet(wb, ASSUMPTIONS)
 
-    print("  [2/6] Creating Scenarios sheet...")
+    print("  [2/8] Creating Scenarios sheet...")
     create_scenarios_sheet(wb)
 
-    print("  [3/6] Building Income Statement...")
+    print("  [3/8] Building Income Statement...")
     build_income_statement(wb)
 
-    print("  [4/6] Building Balance Sheet...")
+    print("  [4/8] Building Balance Sheet...")
     build_balance_sheet(wb)
 
-    print("  [5/6] Building Cash Flow Statement...")
+    print("  [5/8] Building Cash Flow Statement...")
     build_cash_flow(wb)
 
-    print("  [6/6] Applying global formatting...")
+    print("  [6/8] Building Valuation sheet...")
+    create_valuation_sheet(wb, ASSUMPTIONS)
+
+    print("  [7/8] Building Cap Table...")
+    create_cap_table_sheet(wb, ASSUMPTIONS)
+
+    print("  [8/8] Applying global formatting...")
     apply_global_formatting(wb)
 
     output_path = "financial_model.xlsx"
