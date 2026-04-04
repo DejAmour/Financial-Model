@@ -18,6 +18,10 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.comments import Comment
+from openpyxl.chart import LineChart, BarChart, PieChart, AreaChart, Reference, Series
+from openpyxl.chart.series import DataPoint
+from openpyxl.chart.label import DataLabelList
+from openpyxl.formatting.rule import ColorScaleRule
 
 # ==============================================================================
 # ALL ASSUMPTIONS DEFINED IN A SINGLE DICTIONARY
@@ -1720,9 +1724,20 @@ def create_cap_table_sheet(wb: openpyxl.Workbook, assumptions: dict):
         set_cell(ws, data_row, 6, f"=E{data_row}/$J$2",
                  font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
 
-        # Valuation (£) = Amount(£) / ownership_pct
-        set_cell(ws, data_row, 7, f"=E{data_row}/C{data_row}",
-                 font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+        # Valuation (£) — linked to Valuation sheet Enterprise Value (row 24)
+        # Map each round to its corresponding year column in Valuation sheet:
+        #   Col C = year 0 (Pre-seed T1)
+        #   Col D = year 1 (Pre-seed T2, Seed)
+        #   Col E = year 2 (Series A T1)
+        #   Col F = year 3 (Series A T2)
+        #   Col G = year 4 (Series B)
+        valuation_cols_map = ["C", "D", "D", "E", "F", "G"]  # Pre-seed T1, Pre-seed T2, Seed, Series A T1, Series A T2, Series B
+        val_col = valuation_cols_map[r_idx]
+        set_cell(ws, data_row, 7, f"=Valuation!{val_col}24",
+                 font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        add_comment(ws, data_row, 7,
+            f"Linked to Valuation sheet Enterprise Value (row 24, col {val_col}).\n"
+            f"EV = Revenue × {assumptions['ev_revenue_multiple']}x multiple.")
 
         # Valuation ($)
         set_cell(ws, data_row, 8, f"=G{data_row}/$J$2",
@@ -1811,7 +1826,414 @@ def create_cap_table_sheet(wb: openpyxl.Workbook, assumptions: dict):
 
 
 # ==============================================================================
-# 8. APPLY GLOBAL FORMATTING
+# 8. CREATE INVESTOR DASHBOARD
+# ==============================================================================
+
+def create_dashboard_sheet(wb: openpyxl.Workbook, assumptions: dict):
+    """
+    Creates an investor-facing Dashboard with charts and visualizations.
+
+    Includes:
+    - Scenario comparison: Revenue over time (Line chart, 3 series)
+    - Revenue streams breakdown (Stacked area chart)
+    - Extended kWh revenue projection 15-year horizon (Line chart)
+    - Core financial metrics: EBIT & Net Income (Clustered column chart)
+    - Funds Raised year-on-year (Column chart)
+    - Valuation metrics summary table
+    - Cap Table ownership distribution (Pie chart)
+    - Investor potential returns table
+
+    Layout:
+      Rows 1-3:    Title & summary metrics
+      Rows 5-20:   Chart 1 (Scenario Revenue) | Chart 2 (Revenue Streams)
+      Rows 22-37:  Chart 3 (kWh Long-term)    | Chart 4 (Core Financials)
+      Rows 39-54:  Chart 5 (Funds Raised)      | Chart 6 (Valuation Metrics)
+      Rows 56-71:  Chart 7 (Ownership Pie)     | Chart 8 (Investor Returns)
+      Rows 80-100: Hidden extended kWh projection data
+    """
+    ws = wb.create_sheet("Dashboard")
+
+    years = assumptions["years"]          # [2026, 2027, 2028, 2029, 2030]
+    rounds = assumptions["funding_rounds"]
+    ev_mult = assumptions["ev_revenue_multiple"]
+    inv_amounts = [50_000, 100_000, 250_000, 500_000, 1_000_000]
+
+    # ── Column widths ──────────────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 28
+    for c_idx in range(2, 16):
+        ws.column_dimensions[get_column_letter(c_idx)].width = 14
+
+    # ── Row 1: Title ──────────────────────────────────────────────────────────
+    ws.row_dimensions[1].height = 30
+    set_cell(ws, 1, 1, "JOULE FINANCIAL MODEL — INVESTOR DASHBOARD",
+             font=Font(name="Calibri", color="FFFFFF", size=14, bold=True),
+             fill=PatternFill("solid", fgColor="00B050"),
+             alignment=LEFT)
+    for c in range(2, 16):
+        ws.cell(row=1, column=c).fill = PatternFill("solid", fgColor="00B050")
+
+    # ── Row 2-3: Key headline metrics (linked to Valuation sheet) ─────────────
+    headline_items = [
+        (2, 1, "Equity Value Today (£)",    "=IF(ISNUMBER(Valuation!C44),Valuation!C44,\"N/A\")",  GBP_FORMAT),
+        (2, 4, "Exit Valuation Year 5 (£)", "=IF(ISNUMBER(Valuation!H27),Valuation!H27,\"N/A\")",  GBP_FORMAT),
+        (2, 7, "Investor IRR",              "=IF(ISNUMBER(Valuation!C45),Valuation!C45,\"N/A\")",  PCT_FORMAT),
+        (2, 10,"Cash-on-Cash Multiple",     "=IF(ISNUMBER(Valuation!C46),Valuation!C46,\"N/A\")",  '0.00"x"'),
+        (3, 1, "EV/Revenue Multiple",       ev_mult,                                                '0"x"'),
+        (3, 4, "Model Exit Year",           assumptions["exit_year"],                               '0" years"'),
+        (3, 7, "Scenario",                  "=Assumptions!C4",                                      None),
+    ]
+    HEADLINE_FONT   = Font(name="Calibri", color="1F4E79", size=10, bold=True)
+    HEADLINE_LABEL  = Font(name="Calibri", color="595959", size=9)
+    for row_n, col_n, label, val, fmt in headline_items:
+        set_cell(ws, row_n, col_n,     label, font=HEADLINE_LABEL, alignment=LEFT)
+        fnt = GREEN if (isinstance(val, str) and val.startswith("=")) else BLUE
+        set_cell(ws, row_n, col_n + 1, val,   font=HEADLINE_FONT,  alignment=LEFT,
+                 number_format=fmt)
+
+    # ── CHART 1: Scenario Comparison — Total Gross Revenue ────────────────────
+    # Worst:  Scenarios!C9:G9  (or Scenarios rows for revenue totals)
+    # Base:   Scenarios!C13:G13
+    # Best:   Scenarios!C17:G17
+    # Use Income Statement row 10 as the live base-case revenue reference,
+    # and derive worst/best from scenario multipliers held in Scenarios sheet.
+    # We place a small helper table at rows 5-7 (cols A-F) to anchor the chart.
+    set_cell(ws, 5, 1, "Year",    font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 2, "Worst",   font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 3, "Base",    font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 4, "Best",    font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    for i, yr in enumerate(years):
+        r = 6 + i
+        set_cell(ws, r, 1, yr,  font=BLACK, alignment=CENTER)
+        # Worst, Base, Best revenue from Scenarios sheet rows 9, 13, 17
+        set_cell(ws, r, 2, f"=Scenarios!{get_column_letter(3+i)}9",  font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 3, f"=Scenarios!{get_column_letter(3+i)}13", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 4, f"=Scenarios!{get_column_letter(3+i)}17", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    chart1 = LineChart()
+    chart1.title        = "Scenario Comparison: Total Gross Revenue"
+    chart1.style        = 10
+    chart1.y_axis.title = "Revenue (£)"
+    chart1.x_axis.title = "Year"
+    chart1.height       = 12
+    chart1.width        = 20
+
+    cats1 = Reference(ws, min_col=1, min_row=6, max_row=10)
+    for s_col, s_name, s_color in [(2, "Worst", "FF0000"), (3, "Base", "1F4E79"), (4, "Best", "00B050")]:
+        data1 = Reference(ws, min_col=s_col, min_row=5, max_row=10)
+        ser1  = Series(data1, title_from_data=True)
+        ser1.graphicalProperties.line.solidFill = s_color
+        ser1.graphicalProperties.line.width     = 20000
+        chart1.append(ser1)
+    chart1.set_categories(cats1)
+    ws.add_chart(chart1, "F5")
+
+    # ── CHART 2: Revenue Streams Breakdown (Stacked Area) ─────────────────────
+    # IS rows: 7=Upfront Fee, 8=Completion Fee, 9=kWh Revenue (cols C-G)
+    set_cell(ws, 5, 14, "Year",         font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 15, "Upfront Fee",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 16, "Completion",   font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 5, 17, "kWh Revenue",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    for i, yr in enumerate(years):
+        r = 6 + i
+        c_is = get_column_letter(3 + i)
+        set_cell(ws, r, 14, yr, font=BLACK, alignment=CENTER)
+        set_cell(ws, r, 15, f"='Income Statement'!{c_is}7",  font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 16, f"='Income Statement'!{c_is}8",  font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 17, f"='Income Statement'!{c_is}9",  font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    chart2 = AreaChart()
+    chart2.title        = "Revenue Streams Breakdown"
+    chart2.style        = 10
+    chart2.grouping     = "stacked"
+    chart2.y_axis.title = "Revenue (£)"
+    chart2.x_axis.title = "Year"
+    chart2.height       = 12
+    chart2.width        = 20
+
+    cats2 = Reference(ws, min_col=14, min_row=6, max_row=10)
+    for s_col, s_name, s_color in [
+        (15, "Upfront Fee",  "1F4E79"),
+        (16, "Completion Fee","2E75B6"),
+        (17, "kWh Revenue",  "00B050"),
+    ]:
+        data2 = Reference(ws, min_col=s_col, min_row=5, max_row=10)
+        ser2  = Series(data2, title_from_data=True)
+        ser2.graphicalProperties.solidFill = s_color
+        chart2.append(ser2)
+    chart2.set_categories(cats2)
+    ws.add_chart(chart2, "R5")
+
+    # ── HIDDEN DATA: Extended kWh Revenue Projection (rows 80-100) ────────────
+    # Project funds raised years 6-10 using base_funds_raised[-1] × (1 + CAGR)
+    # Then calculate cumulative kWh revenue per year 6-15
+    #
+    # Layout (cols A-C):
+    #   Row 80: headers
+    #   Rows 81-95: year | cumul funds raised | kWh revenue (= cumul_funds × kwh_rate)
+    #
+    # Year 5 base = Income Statement G10 (2030 total gross revenue)
+    # We use the base funds raised CAGR from 2029→2030 as the growth driver.
+
+    set_cell(ws, 80, 1, "Year (Extended)",    font=BOLD_BLACK, alignment=CENTER)
+    set_cell(ws, 80, 2, "Cum. Funds Raised",  font=BOLD_BLACK, alignment=CENTER)
+    set_cell(ws, 80, 3, "kWh Revenue (£)",    font=BOLD_BLACK, alignment=CENTER)
+
+    kwh_rate   = assumptions["kwh_revenue_rate"]      # 2.12%
+    base_funds = assumptions["base_funds_raised"]     # list of 5 values
+    rev_cagr   = assumptions["revenue_cagr_y5_y10"]   # 0.60
+
+    # Rows 81-85: actual years 1-5 (2026-2030) — link to IS
+    for i, yr in enumerate(years):
+        r = 81 + i
+        c_is = get_column_letter(3 + i)
+        set_cell(ws, r, 1, yr, font=BLACK, alignment=CENTER)
+        # Cumulative funds ≈ Gross Revenue (all fees derive from it; use Scenarios row 12 = funds raised)
+        set_cell(ws, r, 2, f"=Scenarios!{c_is}12", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 3, f"='Income Statement'!{c_is}9", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # Rows 86-95: extended years 6-15 (2031-2040)
+    # Funds raised year n = funds raised year n-1 × (1 + rev_cagr)
+    # kWh revenue = cumulative funds raised to date × kwh_rate  (simplified: annual addition)
+    for ext in range(10):
+        r    = 86 + ext
+        yr_n = 2031 + ext
+        prev_funds_ref = f"B{r-1}"
+        set_cell(ws, r, 1, yr_n, font=BLUE, alignment=CENTER)
+        set_cell(ws, r, 2, f"={prev_funds_ref}*(1+{rev_cagr})", font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+        # kWh revenue: sum of (each year's new fund cohort × kwh_rate × remaining contract years)
+        # Simplified: prior kWh + new cohort kWh  (new cohort = B{r}×kwh_rate)
+        set_cell(ws, r, 3, f"=C{r-1}+B{r}*{kwh_rate}", font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    # ── CHART 3: kWh Revenue Long-term (15-year, 2026-2040) ───────────────────
+    set_cell(ws, 22, 1, "Year (15yr)", font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 22, 2, "kWh Revenue", font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    for i in range(15):
+        r = 23 + i
+        set_cell(ws, r, 1, f"=A{81+i}", font=BLACK, alignment=CENTER)
+        set_cell(ws, r, 2, f"=C{81+i}", font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    chart3 = LineChart()
+    chart3.title        = "kWh Revenue: 15-Year Projection (2026–2040)"
+    chart3.style        = 10
+    chart3.y_axis.title = "kWh Revenue (£)"
+    chart3.x_axis.title = "Year"
+    chart3.height       = 12
+    chart3.width        = 20
+
+    cats3 = Reference(ws, min_col=1, min_row=23, max_row=37)
+    data3 = Reference(ws, min_col=2, min_row=22, max_row=37)
+    ser3  = Series(data3, title_from_data=True)
+    ser3.graphicalProperties.line.solidFill = "00B050"
+    ser3.graphicalProperties.line.width     = 20000
+    chart3.append(ser3)
+    chart3.set_categories(cats3)
+    ws.add_chart(chart3, "A22")
+
+    # ── CHART 4: Core Financials — EBIT & Net Income ──────────────────────────
+    set_cell(ws, 22, 14, "Year",       font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 22, 15, "EBIT",       font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 22, 16, "Net Income", font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    for i, yr in enumerate(years):
+        r    = 23 + i
+        c_is = get_column_letter(3 + i)
+        set_cell(ws, r, 14, yr, font=BLACK, alignment=CENTER)
+        set_cell(ws, r, 15, f"='Income Statement'!{c_is}27", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+        set_cell(ws, r, 16, f"='Income Statement'!{c_is}36", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    chart4 = BarChart()
+    chart4.title        = "Core Financials: EBIT & Net Income"
+    chart4.style        = 10
+    chart4.type         = "col"
+    chart4.grouping     = "clustered"
+    chart4.y_axis.title = "Profit (£)"
+    chart4.x_axis.title = "Year"
+    chart4.height       = 12
+    chart4.width        = 20
+
+    cats4 = Reference(ws, min_col=14, min_row=23, max_row=27)
+    for s_col, s_name, s_color in [(15, "EBIT", "1F4E79"), (16, "Net Income", "00B050")]:
+        data4 = Reference(ws, min_col=s_col, min_row=22, max_row=27)
+        ser4  = Series(data4, title_from_data=True)
+        ser4.graphicalProperties.solidFill = s_color
+        chart4.append(ser4)
+    chart4.set_categories(cats4)
+    ws.add_chart(chart4, "R22")
+
+    # ── CHART 5: Funds Raised Year-on-Year (Column) ───────────────────────────
+    set_cell(ws, 39, 1, "Year",         font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 39, 2, "Funds Raised", font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    for i, yr in enumerate(years):
+        r    = 40 + i
+        c_sc = get_column_letter(3 + i)
+        set_cell(ws, r, 1, yr, font=BLACK, alignment=CENTER)
+        set_cell(ws, r, 2, f"=Scenarios!{c_sc}12", font=GREEN, alignment=RIGHT, number_format=GBP_FORMAT)
+
+    chart5 = BarChart()
+    chart5.title        = "Targeted Funds Raised (Base Case)"
+    chart5.style        = 10
+    chart5.type         = "col"
+    chart5.grouping     = "clustered"
+    chart5.y_axis.title = "Funds Raised (£)"
+    chart5.x_axis.title = "Year"
+    chart5.height       = 12
+    chart5.width        = 20
+    chart5.dataLabels   = DataLabelList()
+    chart5.dataLabels.showVal = True
+
+    cats5 = Reference(ws, min_col=1, min_row=40, max_row=44)
+    data5 = Reference(ws, min_col=2, min_row=39, max_row=44)
+    ser5  = Series(data5, title_from_data=True)
+    ser5.graphicalProperties.solidFill = "2E75B6"
+    chart5.append(ser5)
+    chart5.set_categories(cats5)
+    ws.add_chart(chart5, "A39")
+
+    # ── CHART 6: Valuation Metrics Table ──────────────────────────────────────
+    METRIC_HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+    METRIC_VAL_FILL    = PatternFill("solid", fgColor="E2EFDA")
+
+    metric_rows = [
+        ("Equity Value Today",       "=IF(ISNUMBER(Valuation!C44),Valuation!C44,0)",  GBP_FORMAT),
+        ("Exit Valuation (Year 5)",  "=IF(ISNUMBER(Valuation!H27),Valuation!H27,0)",  GBP_FORMAT),
+        ("Investor IRR",             "=IF(ISNUMBER(Valuation!C45),Valuation!C45,0)",  PCT_FORMAT),
+        ("Cash-on-Cash Multiple",    "=IF(ISNUMBER(Valuation!C46),Valuation!C46,0)",  '0.00"x"'),
+        ("Exit Proceeds (£250K inv)","=IF(ISNUMBER(Valuation!C47),Valuation!C47,0)",  GBP_FORMAT),
+        ("EV/Revenue Multiple",      ev_mult,                                           '0"x"'),
+    ]
+    start_r = 39
+    set_cell(ws, start_r, 14, "KEY VALUATION METRICS",
+             font=Font(name="Calibri", color="FFFFFF", size=10, bold=True),
+             fill=METRIC_HEADER_FILL, alignment=CENTER)
+    for c in range(15, 18):
+        ws.cell(row=start_r, column=c).fill = METRIC_HEADER_FILL
+
+    for m_idx, (label, val, fmt) in enumerate(metric_rows):
+        r = start_r + 1 + m_idx
+        set_cell(ws, r, 14, label, font=BOLD_BLACK, alignment=LEFT)
+        fnt = GREEN if (isinstance(val, str) and val.startswith("=")) else BLUE
+        set_cell(ws, r, 15, val, font=fnt, alignment=RIGHT,
+                 number_format=fmt, fill=METRIC_VAL_FILL)
+        for c in range(16, 18):
+            ws.cell(row=r, column=c).fill = METRIC_VAL_FILL
+
+    # Conditional formatting on IRR cell (row start_r+3, col 15)
+    irr_cell = f"O{start_r + 3}"
+    ws.conditional_formatting.add(
+        irr_cell,
+        ColorScaleRule(
+            start_type="num", start_value=0.0,   start_color="FFC7CE",
+            mid_type="num",   mid_value=0.3,     mid_color="FFEB9C",
+            end_type="num",   end_value=0.5,     end_color="C6EFCE",
+        )
+    )
+
+    # ── CHART 7: Cap Table — Ownership Pie Chart ───────────────────────────────
+    # Cap Table Section D: rows 29-35 col C = ownership %, col A = name
+    # Build a local reference table at rows 56-64 (cols A-B)
+    set_cell(ws, 56, 1, "Shareholder",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+    set_cell(ws, 56, 2, "Ownership %",  font=BOLD_BLACK, alignment=CENTER, border=THIN_BORDER)
+
+    shareholder_names = ["Founders"] + [rnd["name"] for rnd in rounds]
+    for s_idx, s_name in enumerate(shareholder_names):
+        r = 57 + s_idx
+        set_cell(ws, r, 1, s_name, font=BLACK, alignment=LEFT)
+        # Cap Table rows 29-35, col C
+        set_cell(ws, r, 2, f"='Cap Table'!C{29+s_idx}", font=GREEN, alignment=CENTER, number_format=PCT_FORMAT)
+
+    chart7 = PieChart()
+    chart7.title  = "Cap Table: Final Ownership Distribution"
+    chart7.style  = 10
+    chart7.height = 12
+    chart7.width  = 20
+
+    cats7 = Reference(ws, min_col=1, min_row=57, max_row=63)
+    data7 = Reference(ws, min_col=2, min_row=56, max_row=63)
+    ser7  = Series(data7, title_from_data=True)
+    chart7.append(ser7)
+    chart7.set_categories(cats7)
+    ws.add_chart(chart7, "A56")
+
+    # ── CHART 8: Investor Returns Table ───────────────────────────────────────
+    # Columns: Investment | Equity Stake | Final Stake | Exit Proceeds | IRR | CoCM
+    # Stake is proportional: (investment / 250,000) × 4.0652%  (Pre-seed T1 rate)
+    # Dilution applied: same ratio as Valuation sheet (entry / exit stake)
+    # Exit proceeds = stake_at_exit × exit equity value
+
+    INV_HEADER_FILL = PatternFill("solid", fgColor="00B050")
+    inv_headers = [
+        "Investment (£)", "Equity at Entry", "Equity at Exit",
+        "Exit Proceeds (£)", "Cash-on-Cash", "IRR (Approx)"
+    ]
+    set_cell(ws, 56, 14, "INVESTOR POTENTIAL RETURNS",
+             font=Font(name="Calibri", color="FFFFFF", size=10, bold=True),
+             fill=INV_HEADER_FILL, alignment=CENTER)
+    for c in range(15, 20):
+        ws.cell(row=56, column=c).fill = INV_HEADER_FILL
+
+    for h_idx, hdr in enumerate(inv_headers):
+        set_cell(ws, 57, 14 + h_idx, hdr,
+                 font=Font(name="Calibri", color="1F4E79", size=9, bold=True),
+                 alignment=CENTER, border=THIN_BORDER)
+
+    # Reference equity stake values from Valuation sheet
+    # entry stake = Valuation!C35 (row 35 col 3 = equity_stake_at_entry)
+    # exit  stake = Valuation!C37 (row 37 col 3 = equity_stake_at_exit)
+    # exit equity = Valuation!H27 (equity value at exit year 5)
+    # Baseline investment = Valuation!C34 (Pre-seed T1 investment amount)
+    for inv_idx, inv_amt in enumerate(inv_amounts):
+        r = 58 + inv_idx
+        set_cell(ws, r, 14, inv_amt, font=BLUE, alignment=RIGHT, number_format=GBP_FORMAT)
+        # Equity at entry: scaled proportionally from Valuation entry stake and investment
+        set_cell(ws, r, 15, f"=IF(Valuation!$C$34>0,Valuation!$C$35*(N{r}/Valuation!$C$34),0)",
+                 font=GREEN, alignment=CENTER, number_format=PCT_FORMAT)
+        # Equity at exit: apply same dilution ratio
+        set_cell(ws, r, 16,
+                 f"=IF(AND(ISNUMBER(Valuation!$C$35),Valuation!$C$35>0),"
+                 f"O{r}*(Valuation!$C$37/Valuation!$C$35),0)",
+                 font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+        # Exit proceeds: stake_at_exit × exit equity value
+        set_cell(ws, r, 17,
+                 f"=IF(ISNUMBER(Valuation!$H$27),P{r}*Valuation!$H$27,0)",
+                 font=BLACK, alignment=RIGHT, number_format=GBP_FORMAT)
+        # Cash-on-cash multiple
+        set_cell(ws, r, 18, f"=IF(N{r}>0,Q{r}/N{r},0)",
+                 font=BLACK, alignment=CENTER, number_format='0.00"x"')
+        # IRR (Excel IRR formula over 5-year horizon)
+        set_cell(ws, r, 19,
+                 f"=IF(Q{r}>0,IRR({{-N{r},0,0,0,0,Q{r}}}),0)",
+                 font=BLACK, alignment=CENTER, number_format=PCT_FORMAT)
+
+    # Conditional formatting on returns table (IRR column S, rows 58-62)
+    ws.conditional_formatting.add(
+        f"S58:S62",
+        ColorScaleRule(
+            start_type="num", start_value=0.0,  start_color="FFC7CE",
+            mid_type="num",   mid_value=0.3,    mid_color="FFEB9C",
+            end_type="num",   end_value=0.6,    end_color="C6EFCE",
+        )
+    )
+
+    # ── Notes row ─────────────────────────────────────────────────────────────
+    set_cell(ws, 73, 1,
+             "Note: All charts update dynamically when the Scenario dropdown "
+             "(Assumptions!C4) changes between Worst / Base / Best case.",
+             font=Font(name="Calibri", color="595959", size=9, italic=True),
+             alignment=LEFT)
+
+    ws.freeze_panes = "A4"
+    ws.sheet_view.showGridLines = True
+    ws.page_setup.orientation   = "landscape"
+    ws.page_setup.fitToPage     = True
+    ws.page_setup.fitToWidth    = 1
+    return ws
+
+
+# ==============================================================================
+# 9. APPLY GLOBAL FORMATTING
 # ==============================================================================
 
 def apply_global_formatting(wb: openpyxl.Workbook):
@@ -1831,6 +2253,7 @@ def apply_global_formatting(wb: openpyxl.Workbook):
         "Cash Flow":        "7030A0",   # purple
         "Valuation":        "C65911",   # burnt orange
         "Cap Table":        "7030A0",   # purple
+        "Dashboard":        "00B050",   # bright green (investor-facing)
     }
 
     for sheet_name, hex_colour in tab_colours.items():
@@ -1843,7 +2266,7 @@ def apply_global_formatting(wb: openpyxl.Workbook):
             ws.page_setup.orientation = "landscape"
 
     # Ensure "Assumptions" is first tab, then Scenarios, then statements
-    desired_order = ["Assumptions", "Scenarios", "Income Statement", "Balance Sheet", "Cash Flow", "Valuation", "Cap Table"]
+    desired_order = ["Assumptions", "Scenarios", "Income Statement", "Balance Sheet", "Cash Flow", "Valuation", "Cap Table", "Dashboard"]
     for i, name in enumerate(desired_order):
         if name in wb.sheetnames:
             wb.move_sheet(name, offset=wb.sheetnames.index(name) - i)
@@ -1884,7 +2307,10 @@ def main():
     print("  [7/8] Building Cap Table...")
     create_cap_table_sheet(wb, ASSUMPTIONS)
 
-    print("  [8/8] Applying global formatting...")
+    print("  [8/9] Building Investor Dashboard...")
+    create_dashboard_sheet(wb, ASSUMPTIONS)
+
+    print("  [9/9] Applying global formatting...")
     apply_global_formatting(wb)
 
     output_path = "financial_model.xlsx"
