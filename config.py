@@ -7,11 +7,11 @@ Centralizes all model parameters with metadata for tooltips.
 from dataclasses import dataclass, field
 from typing import List, Dict
 
-THEME = {
-    "primary_color": "#B1B4BC",
-    "secondary_color": "#B5E1D4",
-    "accent_color": "#22A67F",
-    "background": "#D0D2D7",
+THEME = {    
+    "primary_color": "#00B050",
+    "secondary_color": "#1F4E79",
+    "accent_color": "#2E75B6",
+    "background": "#FAFAFA",
     "text_color": "#333333",
     "font_family": "Inter, sans-serif",
 }
@@ -22,6 +22,8 @@ CHART_COLORS = {
     "cap_table": ["#1F4E79", "#2E75B6", "#5B9BD5", "#A5C8E4", "#00B050", "#70AD47", "#FFC000"],
     "impact": ["#00B050", "#2E75B6", "#FFC000", "#FF6B6B"],
 }
+
+
 
 COMMUNITY_IMPACT_CONFIG = {
     "avg_turbine_cost_gbp": 3_300_000,
