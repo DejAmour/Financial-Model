@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Joule Financial Model Generator
+InfraFund Financial Model Generator
 ================================
 Generates a fully linked three-statement financial model (Income Statement,
 Balance Sheet, Cash Flow Statement) for a green energy infrastructure
@@ -209,7 +209,7 @@ def write_year_headers(ws, row: int, years: list, start_col: int = 3):
         c.border = THIN_BORDER
 
 
-def add_comment(ws, row: int, column: int, text: str, author: str = "Joule Model"):
+def add_comment(ws, row: int, column: int, text: str, author: str = "InfraFund Model"):
     """Add an Excel comment to a cell."""
     comment = Comment(text, author)
     comment.width  = 300
@@ -238,7 +238,7 @@ def create_assumptions_sheet(wb: openpyxl.Workbook, assumptions: dict):
 
     # ── Title ──────────────────────────────────────────────────────────────────
     ws.row_dimensions[1].height = 24
-    set_cell(ws, 1, 1, "JOULE FINANCIAL MODEL — ASSUMPTIONS",
+    set_cell(ws, 1, 1, "INFRAFUND FINANCIAL MODEL — ASSUMPTIONS",
              font=TITLE_FONT, fill=SECTION_FILL, alignment=LEFT)
     for c in range(2, 9):
         ws.cell(row=1, column=c).fill = SECTION_FILL
@@ -1865,7 +1865,7 @@ def create_dashboard_sheet(wb: openpyxl.Workbook, assumptions: dict):
 
     # ── Row 1: Title ──────────────────────────────────────────────────────────
     ws.row_dimensions[1].height = 30
-    set_cell(ws, 1, 1, "JOULE FINANCIAL MODEL — INVESTOR DASHBOARD",
+    set_cell(ws, 1, 1, "INFRAFUND FINANCIAL MODEL — INVESTOR DASHBOARD",
              font=Font(name="Calibri", color="FFFFFF", size=14, bold=True),
              fill=PatternFill("solid", fgColor="00B050"),
              alignment=LEFT)
@@ -2284,7 +2284,7 @@ def main():
     default_sheet = wb.active
     wb.remove(default_sheet)
 
-    print("Building Joule Financial Model...")
+    print("Building InfraFund Financial Model...")
 
     print("  [1/8] Creating Assumptions sheet...")
     create_assumptions_sheet(wb, ASSUMPTIONS)
