@@ -431,7 +431,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()"""
+    main()
 Joule Financial Model — Interactive Investor Dashboard
 ========================================================
 A narrative-driven web application for non-technical investors.
