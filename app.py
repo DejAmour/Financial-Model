@@ -10,7 +10,7 @@ import streamlit as st
 import pandas as pd
 from typing import Dict
 
-from config import THEME, ASSUMPTION_TOOLTIPS, ModelAssumptions, get_default_assumptions
+from config import ASSUMPTION_TOOLTIPS, ModelAssumptions, get_default_assumptions
 from calculations import (
     compute_income_statement, compute_valuation, compute_valuation_breakdown,
     compute_cap_table, compute_community_impact, apply_scenario,
@@ -27,30 +27,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(f"""
-<style>
-    html, body, [class*="st-"] {{ font-family: {THEME['font_family']}; }}
-    [data-testid="stSidebar"] {{ background-color: {THEME['secondary_color']}; }}
-    [data-testid="stSidebar"] * {{ color: white !important; }}
-    [data-testid="stSidebar"] .stSlider label,
-    [data-testid="stSidebar"] .stNumberInput label {{
-        margin-bottom: 8px !important;
-        display: block !important;
-    }}
-    [data-testid="stSidebar"] .stSlider,
-    [data-testid="stSidebar"] .stNumberInput {{ margin-bottom: 20px !important; }}
-    [data-testid="stMetric"] {{
-        background-color: #f8f9fa;
-        padding: 16px;
-        border-radius: 8px;
-        border-left: 4px solid {THEME['primary_color']};
-    }}
-    .stTabs [data-baseweb="tab-list"] {{ gap: 24px; }}
-    .stTabs [data-baseweb="tab"] {{ padding: 12px 24px; font-weight: 600; }}
-    #MainMenu {{visibility: hidden;}}
-    footer {{visibility: hidden;}}
-</style>
-""", unsafe_allow_html=True)
 
 
 def init_session_state():
@@ -76,26 +52,21 @@ def render_sidebar() -> Dict:
         st.subheader("💰 Fee Structure")
         with st.expander("ℹ️ Why these rates?", expanded=False):
             st.markdown(ASSUMPTION_TOOLTIPS["upfront_fee_rate"])
-        st.markdown("<br>", unsafe_allow_html=True)
         upfront_fee = st.slider("Tokenisation Fee Rate (%)", min_value=0.5, max_value=5.0,
                                 value=st.session_state.assumptions.upfront_fee_rate * 100, step=0.1, format="%.1f%%") / 100
-        st.markdown("<br>", unsafe_allow_html=True)
         kwh_rate = st.slider("Assurance (kWh) Revenue Rate (%)", min_value=1.0, max_value=4.0,
                              value=st.session_state.assumptions.kwh_revenue_rate * 100, step=0.1, format="%.2f%%") / 100
         st.markdown("---")
 
         st.subheader("📈 Growth")
-        st.markdown("<br>", unsafe_allow_html=True)
         year_1_funds = st.number_input("Year 1 Funds Raised (£M)", min_value=5.0, max_value=50.0,
                                        value=st.session_state.assumptions.base_funds_raised[0] / 1_000_000, step=1.0) * 1_000_000
-        st.markdown("<br>", unsafe_allow_html=True)
         growth_rate = st.slider("Annual Growth Rate (Y1→Y5)", min_value=1.5, max_value=4.0, value=2.0, step=0.1, format="%.1fx")
         st.markdown("---")
 
         st.subheader("🧮 Valuation")
         with st.expander("ℹ️ Why this multiple?", expanded=False):
             st.markdown(ASSUMPTION_TOOLTIPS["ev_revenue_multiple"])
-        st.markdown("<br>", unsafe_allow_html=True)
         ev_multiple = st.slider("Exit EV/Revenue Multiple", min_value=3.0, max_value=12.0,
                                 value=st.session_state.assumptions.ev_revenue_multiple, step=0.5, format="%.1fx")
 
