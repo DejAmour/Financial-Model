@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 THEME = {
-    "primary_color": "#00B050",
-    "secondary_color": "#1F4E79",
-    "accent_color": "#2E75B6",
-    "background": "#FAFAFA",
+    "primary_color": "#B1B4BC",
+    "secondary_color": "#B5E1D4",
+    "accent_color": "#22A67F",
+    "background": "#D0D2D7",
     "text_color": "#333333",
     "font_family": "Inter, sans-serif",
 }
